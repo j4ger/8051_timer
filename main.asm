@@ -23,7 +23,7 @@ org 002BH
 ajmp timer_2_interrupt
 ;----timer 2 interrupt end----
 
-;----program start----
+;----main segment start----
 org 0080H
 prog_start:
 ;init device
@@ -36,25 +36,42 @@ clr buzzer
 mov SP,#initial_stack_top
 
 ;start pseudo countdown thread
-setb TR0
+;setb TR0
 
 ;start pseudo display thread
 mov progress_bit_state,#progress_start
 setb TR1
 
+;display initial prompt
+acall display_end_prompt
+
+;reset time input
+mov time_input,#0
+mov time_left,#0
+
+setb allow_key_test
+setb key_up
+
+;disable led array
+clr countdown_started
+
 main_loop:
-mov number_display_0,#0
-mov number_display_1,#1
-mov number_display_2,#2
-mov number_display_3,#3
+jnb allow_key_test,main_loop
+acall get_keyboard_input
+mov R7,keyboard_input
+cjne R7,#false_input,keydown
+setb key_up
+sjmp main_loop
 
-mov time_input,#120
-mov time_left,#118
-
-main_test_loop:
-
-sjmp main_test_loop
-
+keydown:
+clr buzzer
+jnb key_up,main_loop
+clr key_up
+clr allow_key_test
+mov button_test_stage_1,keyboard_input
+setb TR2
+sjmp main_loop
+;----main segment end----
 
 ;----pin configuration definitions----
 number_display_a bit P0.6
@@ -80,8 +97,7 @@ countdown_timer_initial_high equ 06H
 countdown_timer_initial_low equ 0C6H
 
 ;timer 2
-;2552cycles -> 0.01s
-button_detector_initial_high equ 0F6H
+button_detector_initial_high equ 0FFH
 button_detector_initial_low equ 07H
 
 number_display_0 equ 50H
@@ -99,18 +115,29 @@ end_display_1 equ 16
 end_display_2 equ 17
 progress_start equ 18
 progress_end equ 23
+letter_E equ 25
+letter_r equ 26
+exclaimation_mark equ 27
+pause_mark equ 28
 
 time_input equ 55H
 time_left equ 56H
 
 led_array_state equ 57H
-	
+
 button_test_stage_1 equ 58H
-pause equ 20H
+pause equ 30H
 
 false_input equ 21H
-	
+
 progress_bit_state equ 59H
+
+keyboard_input equ 5AH
+
+allow_key_test bit 02H
+key_up bit 03H
+	
+countdown_started bit 04H
 ;----global constant definitions end----
 
 ;----sub: initialize----
@@ -119,11 +146,11 @@ public init_device
 
 init segment code
 rseg init
-		
+
 pca_init:
 mov PCA0MD,#000H
 ret
-	
+
 port_io_init:
 mov P0MDOUT,#0C1H
 mov P1MDOUT,#0FFH
@@ -134,12 +161,17 @@ ret
 timer_init:
 mov TMOD,#021H
 mov CKCON,#002H
-mov TL1,#frame_timer_initial
-mov TH1,#frame_timer_initial
+
 mov TL0,#countdown_timer_initial_low
 mov TH0,#countdown_timer_initial_high
+
+mov TL1,#frame_timer_initial
+mov TH1,#frame_timer_initial
+
 mov TMR2L,#button_detector_initial_low
 mov TMR2H,#button_detector_initial_high
+mov TMR2RLL,#button_detector_initial_low
+mov TMR2RLH,#button_detector_initial_high
 ret
 
 interrupts_init:
@@ -161,6 +193,8 @@ display_number_step:
 push PSW
 push AR0
 push AR1
+push ACC
+
 mov R0,#number_display_state
 
 display_number_step_state_0:
@@ -199,6 +233,7 @@ mov A,@R1
 movc A,@A+DPTR
 mov P1,A
 
+pop ACC
 pop AR1
 pop AR0
 pop PSW
@@ -230,6 +265,10 @@ db 00010000B ;[progress 4]
 db 00001000B ;[progress 5]
 db 00000100B ;[progress 6]
 db 00000000B ;[skipped byte]
+db 10011110B ;E
+db 00001010B ;r
+db 01000001B ;!
+db 00000010B ;[pause mark]
 nop
 ;----sub end----
 
@@ -237,10 +276,14 @@ nop
 display_led_array:
 push PSW
 push AR0
+push ACC
+push B
+
+jnb countdown_started,display_led_array_all_clear
 
 mov R0,#time_input
-cjne @R0,#8,display_led_array_test
-sjmp display_led_array_overflow
+cjne @R0,#15,display_led_array_test
+sjmp display_led_array_non_overflow
 display_led_array_test:
 jnc display_led_array_overflow
 
@@ -296,16 +339,30 @@ setb led_array_clock
 
 djnz R0,display_led_array_set_loop
 
+sjmp display_led_array_end
+
+display_led_array_all_clear:
+mov R0,#8
+setb led_array_data
+display_led_array_all_clear_loop:
+clr led_array_clock
+setb led_array_clock
+djnz R0,display_led_array_all_clear_loop
+
 display_led_array_end:
+pop B
+pop ACC
 pop AR0
 pop PSW
 ret
 ;----sub end----
 
 ;----sub: set display number to time left----
-set_display_time_left:
+display_time_left:
 push PSW
 push AR0
+push ACC
+push B
 
 mov A,time_left
 
@@ -322,49 +379,207 @@ div AB
 mov number_display_2,B
 
 mov R0,#number_display_2
-cjne @R0,#0,set_display_time_left_progress_bit
+cjne @R0,#0,display_time_left_progress_bit
 mov number_display_2,#empty_display
 
 mov R0,#number_display_1
-cjne @R0,#0,set_display_time_left_progress_bit
+cjne @R0,#0,display_time_left_progress_bit
 mov number_display_1,#empty_display
 
 mov R0,#number_display_0
-cjne @R0,#0,set_display_time_left_progress_bit
+cjne @R0,#0,display_time_left_progress_bit
 mov number_display_0,#empty_display
 
-set_display_time_left_progress_bit:
-mov R0,#progress_bit_state
-cjne @R0,#progress_end,set_display_time_left_progress_continue
-mov progress_bit_state,#progress_start
-sjmp set_display_time_left_progress_end
+display_time_left_progress_bit:
+jb countdown_started,display_time_left_progress_bit_run
+mov number_display_3,#end_display_1
+sjmp display_time_left_end
 
-set_display_time_left_progress_continue:
+display_time_left_progress_bit_run:
+mov R0,#progress_bit_state
+cjne @R0,#progress_end,display_time_left_progress_continue
+mov progress_bit_state,#progress_start
+sjmp display_time_left_progress_end
+
+display_time_left_progress_continue:
 inc progress_bit_state
 
-set_display_time_left_progress_end:
+display_time_left_progress_end:
 mov number_display_3,progress_bit_state
 
+display_time_left_end:
+pop B
+pop ACC
 pop AR0
 pop PSW
 ret
 ;----sub end----
 
-;----sub: countdown_start----
-countdown_start:
+;----sub: start countdown----
+start_countdown:
+push AR0
+
+mov R0,#time_input
+cjne @R0,#0,start_countdown_confirm
+acall display_error_prompt
+sjmp start_countdown_end
+
+start_countdown_confirm:
+clr allow_key_test
 setb TR0
+setb indicator_led
+setb countdown_started
 clr buzzer
+mov number_display_3,progress_bit_state
+
+start_countdown_end:
+pop AR0
 ret
 ;----sub end----
 
-;----sub: countdown_end----
-countdown_end:
+;----sub: stop countdown----
+stop_countdown:
+setb allow_key_test
 clr TR0
+clr indicator_led
+clr countdown_started
+acall display_end_prompt
+setb buzzer
+mov time_input,#0
+mov time_left,#0
+ret
+;----sub end----
+
+;----sub: pause countdown----
+pause_countdown:
+setb allow_key_test
+clr TR0
+clr indicator_led
+mov number_display_3,#pause_mark
+ret
+;----sub end----
+
+;----sub: resume countdown----
+resume_countdown:
+clr allow_key_test
+setb TR0
+setb indicator_led
+acall display_time_left
+ret
+;----end sub----
+
+;----sub: display pause prompt----
+display_pause_prompt:
+mov number_display_3,#letter_P
+mov number_display_2,#letter_A
+mov number_display_1,#letter_U
+mov number_display_0,#letter_S
+ret
+;----sub end----
+
+;----sub: display end propmt----
+display_end_prompt:
 mov number_display_0,#end_display_2
 mov number_display_1,#end_display_1
 mov number_display_2,#end_display_1
 mov number_display_3,#end_display_0
-setb buzzer
+ret
+;----sub end----
+
+;----sub: display error propmt----
+display_error_prompt:
+mov number_display_3,#letter_E
+mov number_display_2,#letter_r
+mov number_display_1,#letter_r
+mov number_display_0,#exclaimation_mark
+ret
+;----sub end----
+
+;----sub: append a new digit to the end of current time input----
+append_digit:
+push PSW
+
+jnb countdown_started,append_digit_start
+clr countdown_started
+mov time_input,#0
+mov time_left,#0
+
+append_digit_start:
+clr OV
+mov A,time_input
+mov B,#10
+mul AB
+jb OV,append_digit_error
+
+add A,keyboard_input
+jc append_digit_error
+
+mov time_left,A
+mov time_input,A
+acall display_time_left
+sjmp append_digit_end
+
+append_digit_error:
+mov time_input,#0
+mov time_left,#0
+acall display_error_prompt
+
+append_digit_end:
+pop PSW
+ret
+;----sub end----
+
+;----sub: get keyboard input----
+get_keyboard_input:
+push PSW
+push AR0
+push AR1
+push AR2
+push ACC
+push B
+
+mov R2,#00000001B
+
+mov R0,#0
+get_keyboard_input_outer_loop:
+mov A,R2
+xrl A,#11111111B
+mov P2,A
+mov A,R2
+rl A
+mov R2,A
+
+mov A,P2
+mov R1,#4
+get_keyboard_input_inner_loop:
+rlc A
+jnc get_keyboard_input_found_key
+djnz R1,get_keyboard_input_inner_loop
+
+inc R0
+cjne R0,#4,get_keyboard_input_outer_loop
+sjmp get_keyboard_input_invalid
+
+get_keyboard_input_found_key:
+dec R1
+mov A,R1
+mov B,#4
+mul AB
+
+add A,R0
+mov keyboard_input,A
+sjmp get_keyboard_input_end
+
+get_keyboard_input_invalid:
+mov keyboard_input,#false_input
+
+get_keyboard_input_end:
+pop B
+pop ACC
+pop AR2
+pop AR1
+pop AR0
+pop PSW
 ret
 ;----sub end----
 
@@ -386,11 +601,11 @@ mov TH0,#countdown_timer_initial_high
 mov R0,#time_left
 dec time_left
 cjne @R0,#0,timer_0_interrupt_not_finished
-acall countdown_end
+acall stop_countdown
 sjmp timer_0_interrupt_end
 
 timer_0_interrupt_not_finished:
-acall set_display_time_left
+acall display_time_left
 
 timer_0_interrupt_end:
 pop AR0
@@ -409,6 +624,7 @@ reti
 timer_2_interrupt:
 push PSW
 push AR0
+push ACC
 
 clr TR2
 clr TF2H
@@ -419,32 +635,45 @@ mov R0,#button_test_stage_1
 cjne @R0,#pause,timer_2_interrupt_not_pause
 setb EX0
 jb pause_button,timer_2_interrupt_end
+jnb countdown_started,timer_2_interrupt_start_countdown
 jnb TR0,timer_2_interrupt_resume_countdown
-;pause countdown
-clr TR0
-mov number_display_3,#letter_P
-mov number_display_2,#letter_A
-mov number_display_1,#letter_U
-mov number_display_0,#letter_S
+acall pause_countdown
 sjmp timer_2_interrupt_end
 
 ;resume countdown
 timer_2_interrupt_resume_countdown:
-mov R0,time_left
+mov R0,#time_left
 cjne @R0,#0,timer_2_interrupt_resume_countdown_not_ended
 sjmp timer_2_interrupt_end
 
 timer_2_interrupt_resume_countdown_not_ended:
-setb TR0
-acall set_display_time_left
+acall resume_countdown
+sjmp timer_2_interrupt_end
+
+timer_2_interrupt_start_countdown:
+acall start_countdown
 sjmp timer_2_interrupt_end
 
 ;button != pause
 timer_2_interrupt_not_pause:
+setb allow_key_test
+mov A,keyboard_input
+cjne A,button_test_stage_1,timer_2_interrupt_end
+
+cjne A,#10,timer_2_interrupt_test
+sjmp timer_2_interrupt_end
+timer_2_interrupt_test:
+jnc timer_2_interrupt_end
+
+;valid input
+acall append_digit
+
 sjmp timer_2_interrupt_end
 
 timer_2_interrupt_end:
 mov button_test_stage_1,#false_input
+
+pop ACC
 pop AR0
 pop PSW
 reti
