@@ -23,7 +23,12 @@ org 002BH
 ajmp timer_2_interrupt
 ;----timer 2 interrupt end----
 
-;----main segment start----
+;----timer 3 interrupt----
+org 0073H
+ajmp timer_3_interrupt
+;----timer 3 interrupt end----
+
+;----main program segment start----
 org 0080H
 prog_start:
 ;init device
@@ -31,6 +36,9 @@ lcall init_device
 
 ;stop buzzer from making noise
 clr buzzer
+
+;enable indicator led
+setb indicator_led
 
 ;reset stack top
 mov SP,#initial_stack_top
@@ -71,7 +79,7 @@ clr allow_key_test
 mov button_test_stage_1,keyboard_input
 setb TR2
 sjmp main_loop
-;----main segment end----
+;----main program segment end----
 
 ;----pin configuration definitions----
 number_display_a bit P0.6
@@ -97,8 +105,12 @@ countdown_timer_initial_high equ 06H
 countdown_timer_initial_low equ 0C6H
 
 ;timer 2
-button_detector_initial_high equ 0FFH
-button_detector_initial_low equ 07H
+button_detector_initial_high equ 080H
+button_detector_initial_low equ 00H
+	
+;timer 3
+buzzer_timer_initial_high equ 00H
+buzzer_timer_initial_low equ 00H
 
 number_display_0 equ 50H
 number_display_1 equ 51H
@@ -133,6 +145,9 @@ false_input equ 21H
 progress_bit_state equ 59H
 
 keyboard_input equ 5AH
+clear_button equ 10
+max_button equ 11
+allowed_max_input equ 12
 
 allow_key_test bit 02H
 key_up bit 03H
@@ -172,10 +187,16 @@ mov TMR2L,#button_detector_initial_low
 mov TMR2H,#button_detector_initial_high
 mov TMR2RLL,#button_detector_initial_low
 mov TMR2RLH,#button_detector_initial_high
+
+mov TMR3L,#buzzer_timer_initial_low
+mov TMR3H,#buzzer_timer_initial_high
+mov TMR3RLL,#buzzer_timer_initial_low
+mov TMR3RLH,#buzzer_timer_initial_high
 ret
 
 interrupts_init:
 mov IE,#0ABH
+mov EIE1,#80H
 mov IP,#28H
 setb IT0
 ret
@@ -295,7 +316,7 @@ mul AB
 mov B,time_input
 div AB
 
-sjmp display_led_array_test_countdown
+sjmp display_led_array_test_overflow
 
 display_led_array_overflow:
 mov B,#8
@@ -306,9 +327,17 @@ mov B,A
 mov A,time_left
 div AB
 
-inc A
-cjne A,#9,display_led_array_test_countdown
+display_led_array_test_overflow:
+cjne A,#9,display_led_array_test_overflow_else
 mov A,#8
+sjmp display_led_array_test_under_one
+display_led_array_test_overflow_else:
+jc display_led_array_test_under_one
+mov A,#8
+
+display_led_array_test_under_one:
+cjne A,#0,display_led_array_test_countdown
+inc A
 
 display_led_array_test_countdown:
 mov R0,#time_left
@@ -426,6 +455,8 @@ sjmp start_countdown_end
 
 start_countdown_confirm:
 clr allow_key_test
+mov TL0,#countdown_timer_initial_low
+mov TH0,#countdown_timer_initial_high
 setb TR0
 setb indicator_led
 setb countdown_started
@@ -444,7 +475,7 @@ clr TR0
 clr indicator_led
 clr countdown_started
 acall display_end_prompt
-setb buzzer
+acall start_buzzer
 mov time_input,#0
 mov time_left,#0
 ret
@@ -583,6 +614,13 @@ pop PSW
 ret
 ;----sub end----
 
+;----sub: start buzzer----
+start_buzzer:
+setb buzzer
+mov TMR3CN,#00000100B
+ret
+;----sub end----
+
 ;----interrupt handler: external 0----
 external_0_interrupt:
 clr EX0
@@ -632,6 +670,7 @@ clr TF2L
 
 mov R0,#button_test_stage_1
 ;button == pause
+clr buzzer
 cjne @R0,#pause,timer_2_interrupt_not_pause
 setb EX0
 jb pause_button,timer_2_interrupt_end
@@ -660,11 +699,28 @@ setb allow_key_test
 mov A,keyboard_input
 cjne A,button_test_stage_1,timer_2_interrupt_end
 
-cjne A,#10,timer_2_interrupt_test
+cjne A,#allowed_max_input,timer_2_interrupt_test
+jc timer_2_interrupt_test
 sjmp timer_2_interrupt_end
 timer_2_interrupt_test:
 jnc timer_2_interrupt_end
 
+cjne A,#clear_button,timer_2_interrupt_non_clear_button
+;button == clear
+mov time_input,#0
+mov time_left,#0
+acall display_end_prompt
+sjmp timer_2_interrupt_end
+
+timer_2_interrupt_non_clear_button:
+cjne A,#max_button,timer_2_interrupt_handle_input
+;button == max
+mov time_input,#0FFH
+mov time_left,#0FFH
+acall display_time_left
+sjmp timer_2_interrupt_end
+
+timer_2_interrupt_handle_input:
 ;valid input
 acall append_digit
 
@@ -676,6 +732,12 @@ mov button_test_stage_1,#false_input
 pop ACC
 pop AR0
 pop PSW
+reti
+;----interrupt handler end----
+
+;----interrupt handler: timer 3----
+timer_3_interrupt:
+clr buzzer
 reti
 ;----interrupt handler end----
 
